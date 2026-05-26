@@ -1,14 +1,18 @@
-import { wsClient } from './wsClient.js';
-
 class LayerPanel {
   constructor(container) {
     this.container = container;
     this.layers = [];
     this.activeLayerId = null;
-    this.onLayerChange = null;
-    this.onActiveLayerChange = null;
+    this.pixelCanvas = null;
 
     this._init();
+  }
+
+  setPixelCanvas(pixelCanvas) {
+    this.pixelCanvas = pixelCanvas;
+    pixelCanvas.onLayersChange = (layers) => {
+      this.setState(layers, pixelCanvas.activeLayerId);
+    };
   }
 
   _init() {
@@ -28,8 +32,8 @@ class LayerPanel {
 
     this.container.querySelector('#addLayerBtn').addEventListener('click', () => {
       const name = prompt('Layer name:', `Layer ${this.layers.length + 1}`);
-      if (name !== null) {
-        wsClient.sendOperation('layer_create', { name });
+      if (name !== null && this.pixelCanvas) {
+        this.pixelCanvas.createLayer(name.trim() || undefined);
       }
     });
   }
@@ -85,7 +89,9 @@ class LayerPanel {
 
     item.querySelector('.layer-visibility').addEventListener('click', (e) => {
       e.stopPropagation();
-      wsClient.sendOperation('layer_visible', { layerId: layer.id, visible: !layer.visible });
+      if (this.pixelCanvas) {
+        this.pixelCanvas.setLayerVisible(layer.id, !layer.visible);
+      }
     });
 
     item.querySelector('[data-action="delete"]').addEventListener('click', (e) => {
@@ -94,8 +100,8 @@ class LayerPanel {
         alert('Cannot delete the last layer.');
         return;
       }
-      if (confirm(`Delete layer "${layer.name}"?`)) {
-        wsClient.sendOperation('layer_delete', { layerId: layer.id });
+      if (confirm(`Delete layer "${layer.name}"?`) && this.pixelCanvas) {
+        this.pixelCanvas.deleteLayer(layer.id);
       }
     });
 
@@ -103,8 +109,8 @@ class LayerPanel {
     nameEl.addEventListener('dblclick', (e) => {
       e.stopPropagation();
       const newName = prompt('Rename layer:', layer.name);
-      if (newName && newName.trim()) {
-        wsClient.sendOperation('layer_rename', { layerId: layer.id, name: newName.trim() });
+      if (newName && newName.trim() && this.pixelCanvas) {
+        this.pixelCanvas.renameLayer(layer.id, newName.trim());
       }
     });
 
@@ -113,12 +119,16 @@ class LayerPanel {
       e.stopPropagation();
       const opacity = parseInt(e.target.value) / 100;
       item.querySelector('.opacity-value').textContent = `${e.target.value}%`;
-      wsClient.sendOperation('layer_opacity', { layerId: layer.id, opacity });
+      if (this.pixelCanvas) {
+        this.pixelCanvas.setLayerOpacity(layer.id, opacity);
+      }
     });
 
     item.addEventListener('click', (e) => {
       if (e.target.closest('[data-action]')) return;
-      wsClient.sendOperation('layer_switch', { layerId: layer.id });
+      if (this.pixelCanvas) {
+        this.pixelCanvas.switchLayer(layer.id);
+      }
     });
 
     return item;

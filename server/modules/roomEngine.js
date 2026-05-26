@@ -43,9 +43,9 @@ class RoomEngine {
 
   handleLayerCreate(roomId, payload) {
     const room = this.persistence.getRoom(roomId);
-    const { name } = payload;
+    const { name, id } = payload;
     const newLayer = {
-      id: randomUUID(),
+      id: id || randomUUID(),
       name: name || `Layer ${room.layers.length + 1}`,
       visible: true,
       opacity: 1,
@@ -146,7 +146,18 @@ class RoomEngine {
 
     const handler = handlers[operation.type];
     if (!handler) return null;
-    return handler(roomId, operation);
+    const result = handler(roomId, operation);
+    if (result && operation.clientId) {
+      result.clientId = operation.clientId;
+    }
+    if (result) {
+      this.persistence.addHistory(roomId, result);
+    }
+    return result;
+  }
+
+  getHistory(roomId) {
+    return this.persistence.getHistory(roomId);
   }
 }
 

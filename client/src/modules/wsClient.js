@@ -107,6 +107,11 @@ class WebSocketClient {
     this.ws.send(JSON.stringify({ type: 'chat', message }));
   }
 
+  getHistory() {
+    if (!this.connected || this.ws.readyState !== 1) return;
+    this.ws.send(JSON.stringify({ type: 'get_history' }));
+  }
+
   isOwnOperation(msg) {
     return msg && msg.payload && msg.payload.clientId === this.clientId;
   }

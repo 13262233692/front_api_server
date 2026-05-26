@@ -241,6 +241,9 @@ class ConnectionManager {
           from: ws.userId,
         });
       }
+    } else if (msg.type === 'get_history') {
+      const history = this.roomEngine.getHistory(ws.roomId);
+      ws.send(JSON.stringify({ type: 'history', history }));
     } else if (msg.type === 'chat') {
       this.broadcastToRoom(ws.roomId, {
         type: 'chat',

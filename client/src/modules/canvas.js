@@ -15,6 +15,14 @@ class PixelCanvas {
     this.isDrawing = false;
     this.lastPixel = null;
     this.showGrid = true;
+    this.onLayersChange = null;
+    this.pendingLocalOps = new Set();
+    this.playbackMode = false;
+    this.originalLayers = null;
+    this.originalActiveLayerId = null;
+    this.playbackLayers = null;
+    this.playbackActiveLayerId = null;
+    this.onPlaybackStateChange = null;
 
     this._onMouseDown = this._onMouseDown.bind(this);
     this._onMouseMove = this._onMouseMove.bind(this);
@@ -56,10 +64,28 @@ class PixelCanvas {
     }));
     this.activeLayerId = state.activeLayerId;
     this._resize();
+    this._notifyLayersChange();
+  }
+
+  _notifyLayersChange() {
+    if (this.onLayersChange) {
+      this.onLayersChange(this.getLayersSnapshot());
+    }
+  }
+
+  getLayersSnapshot() {
+    return this.layers.map((l) => ({
+      id: l.id,
+      name: l.name,
+      visible: l.visible,
+      opacity: l.opacity,
+      pixels: l.pixels,
+    }));
   }
 
   setActiveLayer(layerId) {
     this.activeLayerId = layerId;
+    this._notifyLayersChange();
   }
 
   setTool(tool) {
@@ -82,7 +108,8 @@ class PixelCanvas {
     this.ctx.fillStyle = '#ffffff';
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-    for (const layer of this.layers) {
+    const renderLayers = this._getRenderLayers();
+    for (const layer of renderLayers) {
       if (!layer.visible) continue;
       this.ctx.globalAlpha = layer.opacity;
       for (const [key, color] of layer.pixels) {
@@ -136,6 +163,7 @@ class PixelCanvas {
   }
 
   _onMouseDown(e) {
+    if (this.playbackMode) return;
     e.preventDefault();
     if (e.button === 2) {
       this.setTool('eraser');
@@ -190,9 +218,130 @@ class PixelCanvas {
     }
   }
 
-  applyRemoteOperation(payload) {
+  createLayer(name) {
+    if (this.playbackMode) return;
+    const id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'ly_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+    const layerName = name || `Layer ${this.layers.length + 1}`;
+    const newLayer = {
+      id,
+      name: layerName,
+      visible: true,
+      opacity: 1,
+      pixels: new Map(),
+    };
+    this.layers.push(newLayer);
+    this.activeLayerId = id;
+
+    wsClient.sendOperation('layer_create', { name: layerName, id });
+
+    this.render();
+    this._notifyLayersChange();
+    return newLayer;
+  }
+
+  switchLayer(layerId) {
+    if (this.playbackMode) return;
+    const layer = this.layers.find((l) => l.id === layerId);
+    if (!layer) return;
+    this.activeLayerId = layerId;
+    wsClient.sendOperation('layer_switch', { layerId });
+    this._notifyLayersChange();
+  }
+
+  deleteLayer(layerId) {
+    if (this.playbackMode) return;
+    if (this.layers.length <= 1) return;
+    const idx = this.layers.findIndex((l) => l.id === layerId);
+    if (idx === -1) return;
+
+    this.layers.splice(idx, 1);
+    if (this.activeLayerId === layerId) {
+      this.activeLayerId = this.layers[0].id;
+    }
+
+    wsClient.sendOperation('layer_delete', { layerId });
+
+    this.render();
+    this._notifyLayersChange();
+  }
+
+  setLayerOpacity(layerId, opacity) {
+    if (this.playbackMode) return;
+    const layer = this.layers.find((l) => l.id === layerId);
+    if (!layer) return;
+    layer.opacity = Math.max(0, Math.min(1, opacity));
+
+    wsClient.sendOperation('layer_opacity', { layerId, opacity: layer.opacity });
+
+    this.render();
+    this._notifyLayersChange();
+  }
+
+  setLayerVisible(layerId, visible) {
+    if (this.playbackMode) return;
+    const layer = this.layers.find((l) => l.id === layerId);
+    if (!layer) return;
+    layer.visible = visible;
+
+    wsClient.sendOperation('layer_visible', { layerId, visible });
+
+    this.render();
+    this._notifyLayersChange();
+  }
+
+  renameLayer(layerId, name) {
+    if (this.playbackMode) return;
+    const layer = this.layers.find((l) => l.id === layerId);
+    if (!layer) return;
+    layer.name = name;
+
+    wsClient.sendOperation('layer_rename', { layerId, name });
+
+    this._notifyLayersChange();
+  }
+
+  clearLayer(layerId) {
+    if (this.playbackMode) return;
+    const layer = this.layers.find((l) => l.id === layerId);
+    if (!layer) return;
+    layer.pixels.clear();
+
+    wsClient.sendOperation('clear_layer', { layerId });
+
+    this.render();
+    this._notifyLayersChange();
+  }
+
+  applyRemoteOperation(payload, isOwn) {
+    if (isOwn && payload.type !== 'draw') {
+      if (payload.type === 'layer_create') {
+        return;
+      }
+      if (payload.type === 'layer_delete') {
+        return;
+      }
+      if (payload.type === 'layer_switch') {
+        return;
+      }
+      if (payload.type === 'layer_opacity') {
+        return;
+      }
+      if (payload.type === 'layer_visible') {
+        return;
+      }
+      if (payload.type === 'layer_rename') {
+        return;
+      }
+      if (payload.type === 'clear_layer') {
+        return;
+      }
+    }
+
     switch (payload.type) {
       case 'draw': {
+        if (isOwn) return;
         const layer = this.layers.find((l) => l.id === payload.layerId);
         if (!layer) return;
         const key = `${payload.x},${payload.y}`;
@@ -205,12 +354,15 @@ class PixelCanvas {
         break;
       }
       case 'layer_create': {
+        const existing = this.layers.find((l) => l.id === payload.layer.id);
+        if (existing) return;
         this.layers.push({
           ...payload.layer,
           pixels: new Map(Object.entries(payload.layer.pixels || {})),
         });
         this.activeLayerId = payload.layer.id;
         this.render();
+        this._notifyLayersChange();
         break;
       }
       case 'layer_delete': {
@@ -218,27 +370,32 @@ class PixelCanvas {
         if (idx !== -1) this.layers.splice(idx, 1);
         if (payload.activeLayerId) this.activeLayerId = payload.activeLayerId;
         this.render();
+        this._notifyLayersChange();
         break;
       }
       case 'layer_switch': {
         this.activeLayerId = payload.layerId;
+        this._notifyLayersChange();
         break;
       }
       case 'layer_opacity': {
         const layer = this.layers.find((l) => l.id === payload.layerId);
         if (layer) layer.opacity = payload.opacity;
         this.render();
+        this._notifyLayersChange();
         break;
       }
       case 'layer_visible': {
         const layer = this.layers.find((l) => l.id === payload.layerId);
         if (layer) layer.visible = payload.visible;
         this.render();
+        this._notifyLayersChange();
         break;
       }
       case 'layer_rename': {
         const layer = this.layers.find((l) => l.id === payload.layerId);
         if (layer) layer.name = payload.name;
+        this._notifyLayersChange();
         break;
       }
       case 'clear_layer': {
@@ -248,6 +405,126 @@ class PixelCanvas {
         break;
       }
     }
+  }
+
+  startPlayback() {
+    if (this.playbackMode) return;
+    this.originalLayers = this._cloneLayers(this.layers);
+    this.originalActiveLayerId = this.activeLayerId;
+    this.playbackLayers = this._cloneLayers(this.layers);
+    this.playbackActiveLayerId = this.activeLayerId;
+    this.playbackMode = true;
+    this._notifyPlaybackChange();
+    this.render();
+  }
+
+  stopPlayback() {
+    if (!this.playbackMode) return;
+    this.playbackMode = false;
+    if (this.originalLayers) {
+      this.layers = this.originalLayers;
+      this.activeLayerId = this.originalActiveLayerId;
+    }
+    this.originalLayers = null;
+    this.originalActiveLayerId = null;
+    this.playbackLayers = null;
+    this.playbackActiveLayerId = null;
+    this._notifyPlaybackChange();
+    this.render();
+    this._notifyLayersChange();
+  }
+
+  replayTo(history, endIndex) {
+    if (!this.playbackMode) return;
+    const emptyRoom = {
+      width: this.gridWidth,
+      height: this.gridHeight,
+      layers: [],
+      activeLayerId: null,
+    };
+    for (let i = 0; i <= endIndex && i < history.length; i++) {
+      this._applyOperationToState(emptyRoom, history[i]);
+    }
+    this.playbackLayers = emptyRoom.layers.map((l) => ({
+      ...l,
+      pixels: new Map(Object.entries(l.pixels || {})),
+    }));
+    this.playbackActiveLayerId = emptyRoom.activeLayerId;
+    this.render();
+  }
+
+  _cloneLayers(layers) {
+    return layers.map((l) => ({
+      ...l,
+      pixels: new Map(l.pixels),
+    }));
+  }
+
+  _applyOperationToState(state, op) {
+    switch (op.type) {
+      case 'draw': {
+        const layer = state.layers.find((l) => l.id === op.layerId);
+        if (!layer) return;
+        const key = `${op.x},${op.y}`;
+        if (op.color === null || op.color === undefined) {
+          layer.pixels.delete(key);
+        } else {
+          layer.pixels.set(key, op.color);
+        }
+        break;
+      }
+      case 'layer_create': {
+        state.layers.push({
+          id: op.layer.id,
+          name: op.layer.name,
+          visible: op.layer.visible,
+          opacity: op.layer.opacity,
+          pixels: new Map(Object.entries(op.layer.pixels || {})),
+        });
+        state.activeLayerId = op.layer.id;
+        break;
+      }
+      case 'layer_delete': {
+        const idx = state.layers.findIndex((l) => l.id === op.layerId);
+        if (idx !== -1) state.layers.splice(idx, 1);
+        if (op.activeLayerId) state.activeLayerId = op.activeLayerId;
+        break;
+      }
+      case 'layer_switch': {
+        state.activeLayerId = op.layerId;
+        break;
+      }
+      case 'layer_opacity': {
+        const layer = state.layers.find((l) => l.id === op.layerId);
+        if (layer) layer.opacity = op.opacity;
+        break;
+      }
+      case 'layer_visible': {
+        const layer = state.layers.find((l) => l.id === op.layerId);
+        if (layer) layer.visible = op.visible;
+        break;
+      }
+      case 'layer_rename': {
+        const layer = state.layers.find((l) => l.id === op.layerId);
+        if (layer) layer.name = op.name;
+        break;
+      }
+      case 'clear_layer': {
+        const layer = state.layers.find((l) => l.id === op.layerId);
+        if (layer) layer.pixels.clear();
+        break;
+      }
+    }
+  }
+
+  _notifyPlaybackChange() {
+    if (this.onPlaybackStateChange) {
+      this.onPlaybackStateChange(this.playbackMode);
+    }
+  }
+
+  _getRenderLayers() {
+    return this.playbackMode ? this.playbackLayers : this.layers;
   }
 
   destroy() {

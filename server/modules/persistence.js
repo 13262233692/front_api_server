@@ -13,6 +13,7 @@ class Persistence {
         activeLayerId: null,
         users: new Map(),
         createdAt: Date.now(),
+        history: [],
       });
     }
     return this.rooms.get(roomId);
@@ -47,6 +48,24 @@ class Persistence {
   getUsers(roomId) {
     const room = this.getRoom(roomId);
     return Array.from(room.users.values());
+  }
+
+  addHistory(roomId, operation) {
+    const room = this.getRoom(roomId);
+    const entry = {
+      ...operation,
+      timestamp: Date.now(),
+    };
+    room.history.push(entry);
+    if (room.history.length > 1000) {
+      room.history.shift();
+    }
+    return entry;
+  }
+
+  getHistory(roomId) {
+    const room = this.getRoom(roomId);
+    return room.history.slice();
   }
 
   serializeRoom(roomId) {

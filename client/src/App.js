@@ -3,6 +3,7 @@ import { PixelCanvas } from './modules/canvas.js';
 import { Toolbar } from './modules/toolbar.js';
 import { LayerPanel } from './modules/layerPanel.js';
 import { StatusBar } from './modules/statusBar.js';
+import { TimeMachine } from './modules/timeMachine.js';
 
 class App {
   constructor() {
@@ -97,6 +98,7 @@ class App {
       <div class="editor-layout">
         <div class="left-panel">
           <div class="toolbar-panel" id="toolbarPanel"></div>
+          <div class="time-machine-container" id="timeMachineContainer"></div>
         </div>
         <div class="canvas-container" id="canvasContainer">
           <div class="canvas-wrapper" id="canvasWrapper"></div>
@@ -111,6 +113,10 @@ class App {
     this.toolbar = new Toolbar(document.getElementById('toolbarPanel'));
     this.pixelCanvas = new PixelCanvas(document.getElementById('canvasWrapper'));
     this.layerPanel = new LayerPanel(document.getElementById('layerPanel'));
+    this.timeMachine = new TimeMachine(document.getElementById('timeMachineContainer'));
+
+    this.layerPanel.setPixelCanvas(this.pixelCanvas);
+    this.timeMachine.setPixelCanvas(this.pixelCanvas);
 
     this.toolbar.onToolChange = (tool) => this.pixelCanvas.setTool(tool);
     this.toolbar.onColorChange = (color) => this.pixelCanvas.setColor(color);
@@ -134,21 +140,12 @@ class App {
 
     wsClient.on('state_sync', (msg) => {
       this.pixelCanvas.setState(msg.state);
-      this.layerPanel.setState(msg.state.layers, msg.state.activeLayerId);
       this.statusBar.setUsers(msg.state.users);
     });
 
     wsClient.on('operation', (msg) => {
-      this.pixelCanvas.applyRemoteOperation(msg.payload);
-      if (msg.payload.type === 'layer_create' || msg.payload.type === 'layer_delete' ||
-          msg.payload.type === 'layer_switch' || msg.payload.type === 'layer_opacity' ||
-          msg.payload.type === 'layer_visible' || msg.payload.type === 'layer_rename' ||
-          msg.payload.type === 'clear_layer') {
-        const layers = this.pixelCanvas.layers.map((l) => ({
-          id: l.id, name: l.name, visible: l.visible, opacity: l.opacity, pixels: l.pixels,
-        }));
-        this.layerPanel.setState(layers, this.pixelCanvas.activeLayerId);
-      }
+      const isOwn = wsClient.isOwnOperation(msg);
+      this.pixelCanvas.applyRemoteOperation(msg.payload, isOwn);
     });
 
     wsClient.on('user_join', (msg) => {
@@ -165,6 +162,7 @@ class App {
     if (this.toolbar) this.toolbar.destroy();
     if (this.layerPanel) this.layerPanel.destroy();
     if (this.statusBar) this.statusBar.destroy();
+    if (this.timeMachine) this.timeMachine.destroy();
     wsClient.disconnect();
   }
 }
